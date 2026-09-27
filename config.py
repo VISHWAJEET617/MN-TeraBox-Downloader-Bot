@@ -31,3 +31,4 @@ class TERABOX:
     )
     USE_API_DOWNLOAD = os.environ.get("TERABOX_USE_API_DOWNLOAD", "true").lower() == "true"
     API_FALLBACK_TO_SCRAPER = os.environ.get("TERABOX_API_FALLBACK", "true").lower() == "true"
+    COOKIE = os.environ.get("TERABOX_COOKIE", "ndus=YzrYlCHteHuixx7IN5r0fc3sajSOYAHfqDoPM0dP")

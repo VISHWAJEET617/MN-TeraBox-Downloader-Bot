@@ -1,8 +1,8 @@
 import logging
 import threading
 from flask import Flask
-from pyrogram import Client, utils as pyroutils
-from config import BOT, API, OWNER
+from pyrogram import Client
+from config import BOT, API, OWNER, WEB
 
 
 logging.getLogger().setLevel(logging.INFO)
@@ -15,7 +15,7 @@ def home():
     return "MnBot is running!"
 
 def run_flask():
-    app.run(host='0.0.0.0', port=8000)
+    app.run(host='0.0.0.0', port=WEB.PORT)
 
 class MN_Bot(Client):
     def __init__(self):
@@ -34,8 +34,11 @@ class MN_Bot(Client):
         BOT.USERNAME = f"@{me.username}"
         self.mention = me.mention
         self.username = me.username
-        await self.send_message(chat_id=OWNER.ID,
-                                text=f"{me.first_name} ✅✅ BOT started successfully ✅✅")
+        try:
+            await self.send_message(chat_id=OWNER.ID,
+                                    text=f"{me.first_name} ✅✅ BOT started successfully ✅✅")
+        except Exception as e:
+            logging.warning(f"Could not notify owner ({OWNER.ID}): {e}")
         logging.info(f"✅ {me.first_name} BOT started successfully")
 
     async def stop(self, *args):
@@ -43,5 +46,5 @@ class MN_Bot(Client):
         logging.info("Bot Stopped 🙄")
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
+    threading.Thread(target=run_flask, daemon=True).start()
     MN_Bot().run()

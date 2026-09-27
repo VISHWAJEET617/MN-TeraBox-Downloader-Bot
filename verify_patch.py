@@ -13,7 +13,7 @@ SHORTLINK_API = os.environ.get("SHORTLINK_API", "353689935e1e4ac6c70ba88c7e6e71d
 HOW_TO_VERIFY = os.environ.get('HOW_TO_VERIFY', "https://t.me/mntgxo/22")
 
 # MongoDB setup
-mongo_client = AsyncIOMotorClient(DATABASE.URI)
+mongo_client = AsyncIOMotorClient(DATABASE.URI or None)
 mdb = mongo_client[DATABASE.NAME]
 users_col = mdb["verifyusers"]
 tokens_col = mdb["verifytokens"]

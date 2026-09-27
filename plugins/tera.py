@@ -6,7 +6,7 @@ import tempfile
 import requests
 import asyncio
 from uuid import uuid4
-from datetime import datetime, timedelta
+from datetime import datetime
 from urllib.parse import urlencode, urlparse, parse_qs, quote_plus, unquote
 from pyrogram import Client 
 from pyrogram import filters
@@ -19,7 +19,7 @@ from config import CHANNEL, DATABASE, TERABOX
 #please give credits https://github.com/MN-BOTS
 #  @MrMNTG @MusammilN
 
-mongo_client = MongoClient(DATABASE.URI)
+mongo_client = MongoClient(DATABASE.URI or None)
 db = mongo_client[DATABASE.NAME]
 
 settings_col = db["terabox_settings"]
@@ -30,9 +30,13 @@ TERABOX_REGEX = r'https?://(?:www\.)?[^/\s]*tera[^/\s]*\.[a-z]+/(?:s|dl)/[^\s]+'
 API_DOWNLOAD_REGEX = r'https?://terabox-api\.mn-bots\.workers\.dev/dl/[^\s]+'
 REQUEST_TIMEOUT = 30
 QUALITY_SELECTIONS = {}
+PENDING_DELETES = set()
 QUALITY_SELECTION_TTL = 900
+AUTO_DELETE_SECONDS = 43200
+DOWNLOAD_CHUNK_SIZE = 1024 * 1024
 
-COOKIE = "ndus=YzrYlCHteHuixx7IN5r0fc3sajSOYAHfqDoPM0dP" # add your own cookies like ndus=YzrYlCHteHuixx7IN5r0ABCDFXDGSTGBDJKLBKMKH
+# add your own cookies like ndus=YzrYlCHteHuixx7IN5r0ABCDFXDGSTGBDJKLBKMKH (or set TERABOX_COOKIE)
+COOKIE = TERABOX.COOKIE
 
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -272,6 +276,27 @@ def save_cached_upload(info: dict, file_id: str):
     last_upload_col.insert_one(cache_data)
 
 
+async def _delete_later(msg, delay: int):
+    await asyncio.sleep(delay)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+def schedule_delete(msg, delay: int = AUTO_DELETE_SECONDS):
+    # Run in the background so the handler (and its worker) is released immediately
+    task = asyncio.create_task(_delete_later(msg, delay))
+    PENDING_DELETES.add(task)
+    task.add_done_callback(PENDING_DELETES.discard)
+    return task
+
+
+def extract_url(text: str) -> str:
+    match = re.search(TERABOX_REGEX, text or "")
+    return match.group(0) if match else (text or "").strip()
+
+
 def build_caption(info: dict, fallback_url: str) -> str:
     return (
         f"File Name: {info['name']}\n"
@@ -288,7 +313,7 @@ async def send_cached_upload(client, message: Message, cached: dict, info: dict)
     info = info.copy()
     info["name"] = cached.get("file_name") or info.get("name", "download")
     info["size_str"] = cached.get("size_str") or info.get("size_str", get_size(0))
-    caption = build_caption(info, message.text.strip())
+    caption = build_caption(info, (message.text or "").strip())
 
     await message.reply("♻️ File found in cache. Sending without downloading again...")
 
@@ -312,11 +337,7 @@ async def send_cached_upload(client, message: Message, cached: dict, info: dict)
         return False
 
     await message.reply("✅ Cached file will be deleted from your chat after 12 hours.")
-    await asyncio.sleep(43200)
-    try:
-        await sent_msg.delete()
-    except Exception:
-        pass
+    schedule_delete(sent_msg)
     return True
 
 
@@ -329,7 +350,15 @@ def build_quality_buttons(selection_id: str, info: dict) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(buttons)
 
 
+def purge_expired_selections():
+    now = asyncio.get_event_loop().time()
+    for selection_id, selection in list(QUALITY_SELECTIONS.items()):
+        if selection["expires_at"] < now:
+            QUALITY_SELECTIONS.pop(selection_id, None)
+
+
 def cache_quality_selection(user_id: int, info: dict) -> str:
+    purge_expired_selections()
     selection_id = uuid4().hex[:12]
     QUALITY_SELECTIONS[selection_id] = {
         "user_id": user_id,
@@ -350,20 +379,30 @@ def get_cached_quality_selection(selection_id: str, user_id: int):
     return selection
 
 
-async def download_and_upload(client, message: Message, info: dict):
-    temp_path = None
+def download_file(download_link: str, fallback_name: str, dest_dir: str):
+    with requests.get(download_link, headers=DL_HEADERS, stream=True, timeout=REQUEST_TIMEOUT) as r:
+        r.raise_for_status()
+        name = filename_from_response(r, fallback_name)
+        path = os.path.join(dest_dir, name)
+        with open(path, "wb") as f:
+            # iter_content decodes gzip/deflate transfer encodings, unlike r.raw
+            for chunk in r.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
+                if chunk:
+                    f.write(chunk)
+    return name, path
 
+
+async def download_and_upload(client, message: Message, info: dict):
     await message.reply("📥 Downloading...")
+    temp_dir = tempfile.mkdtemp(prefix="terabox_")
 
     try:
-        with requests.get(info["download_link"], headers=DL_HEADERS, stream=True, timeout=REQUEST_TIMEOUT) as r:
-            r.raise_for_status()
-            info["name"] = filename_from_response(r, info["name"])
-            temp_path = os.path.join(tempfile.gettempdir(), info["name"])
-            with open(temp_path, "wb") as f:
-                shutil.copyfileobj(r.raw, f)
+        # Blocking HTTP runs in a thread so the bot keeps serving other users
+        info["name"], temp_path = await asyncio.to_thread(
+            download_file, info["download_link"], info["name"], temp_dir
+        )
 
-        caption = build_caption(info, message.text.strip())
+        caption = build_caption(info, (message.text or "").strip())
 
         if CHANNEL.ID:
             await client.send_document(
@@ -382,20 +421,15 @@ async def download_and_upload(client, message: Message, info: dict):
         )
 
         if sent_msg.document:
-            save_cached_upload(info, sent_msg.document.file_id)
+            await asyncio.to_thread(save_cached_upload, info, sent_msg.document.file_id)
 
         await message.reply("✅ File will be deleted from your chat after 12 hours.")
-        await asyncio.sleep(43200)
-        try:
-            await sent_msg.delete()
-        except Exception:
-            pass
+        schedule_delete(sent_msg)
 
     except Exception as e:
         await message.reply(f"❌ Upload failed:\n`{e}`")
     finally:
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 @Client.on_message(filters.private & filters.regex(TERABOX_REGEX))
@@ -416,8 +450,10 @@ async def handle_terabox(client, message: Message):
         )
         return
 
-    url = message.text.strip()
-    cached = get_cached_upload({"original_url": url, "resolved_url": url, "download_link": url})
+    url = extract_url(message.text)
+    cached = await asyncio.to_thread(
+        get_cached_upload, {"original_url": url, "resolved_url": url, "download_link": url}
+    )
     cached_info = {
         "name": cached.get("file_name", "download") if cached else "download",
         "size_str": cached.get("size_str", get_size(0)) if cached else get_size(0),
@@ -427,11 +463,11 @@ async def handle_terabox(client, message: Message):
         return
 
     try:
-        info = get_download_info(url)
+        info = await asyncio.to_thread(get_download_info, url)
     except Exception as e:
         return await message.reply(f"❌ Failed to get file info:\n{e}")
 
-    cached = get_cached_upload(info)
+    cached = await asyncio.to_thread(get_cached_upload, info)
     if cached and await send_cached_upload(client, message, cached, info):
         return
 
@@ -472,7 +508,7 @@ async def handle_quality_selection(client, callback_query: CallbackQuery):
     await callback_query.answer(f"Selected {quality}")
     await callback_query.message.edit_reply_markup(reply_markup=None)
 
-    cached = get_cached_upload(info)
+    cached = await asyncio.to_thread(get_cached_upload, info)
     if cached and await send_cached_upload(client, callback_query.message, cached, info):
         return
 
