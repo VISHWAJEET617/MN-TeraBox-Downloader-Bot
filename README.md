@@ -70,10 +70,11 @@ Set the following environment variables in your deployment dashboard:
 | `TERABOX_API_DOWNLOAD_ENDPOINT` | API endpoint used to resolve TeraBox share links (default: `https://terabox-api.mn-bots.workers.dev/download`) |
 | `TERABOX_USE_API_DOWNLOAD` | Set to `false` to disable API-based resolving and use only the scraper |
 | `TERABOX_API_FALLBACK` | Set to `false` to stop falling back to the scraper when API resolving fails |
+| `TERABOX_COOKIE` | TeraBox `ndus=...` cookie used by the scraper and direct downloads (overrides the built-in default) |
 
 ---
 ## Important
-do not forget to add your own cookies in [this](https://github.com/MN-bots/MN-TeraBox-Downloader-Bot/blob/main/plugins/tera.py#L35) line
+do not forget to set your own TeraBox cookie via the `TERABOX_COOKIE` environment variable (or edit the default in `config.py`)
 ## 💻 Deployment
 
 You can deploy this bot on platforms like:
